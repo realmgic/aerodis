@@ -198,7 +198,7 @@ func listOpReturnSize(wf io.Writer, ctx *context, args [][]byte, ttl int, op *as
 func arrayRPush(wf io.Writer, ctx *context, args [][]byte, ttl int) error {
 	// ListInsertOp does not like to be called on an empty list and -1
 	// ListAppendOp is ok
-	return listOpReturnSize(wf, ctx, args, ttl, as.ListAppendOp(binName, encode(ctx, args[1])))
+	return listOpReturnSize(wf, ctx, args, ttl, as.ListAppendOp(binName, args[1]))
 }
 
 func cmdRPUSH(wf io.Writer, ctx *context, args [][]byte) error {
@@ -214,7 +214,7 @@ func cmdRPUSHEX(wf io.Writer, ctx *context, args [][]byte) error {
 }
 
 func arrayLPush(wf io.Writer, ctx *context, args [][]byte, ttl int) error {
-	return listOpReturnSize(wf, ctx, args, ttl, as.ListInsertOp(binName, 0, encode(ctx, args[1])))
+	return listOpReturnSize(wf, ctx, args, ttl, as.ListInsertOp(binName, 0, args[1]))
 }
 
 func cmdLPUSH(wf io.Writer, ctx *context, args [][]byte) error {
@@ -323,7 +323,7 @@ func arrayRange(ctx *context, key *as.Key, start int, stop int) ([]interface{}, 
 		return make([]interface{}, 0), 0, true, nil
 	}
 	a := rec.Bins[binName].([]interface{})
-	size, result := a[len(a)-1], a[:len(a)-1]
+	size, result := a[1], a[0].([]interface{})
 	if start < 0 && stop >= 0 {
 		end := size.(int) + start + 1
 		if end < len(result) {

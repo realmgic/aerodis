@@ -137,8 +137,8 @@ func writeArrayBin(wf io.Writer, res []*as.Record, binName string, keyBinName st
 }
 
 func encode(ctx *context, buf []byte) interface{} {
-	if len(buf) < 10 {
-		x, err := strconv.Atoi(string(buf))
+	if len(buf) < 20 {
+		x, err := strconv.ParseInt(string(buf), 10, 64)
 		if err == nil {
 			return x
 		}

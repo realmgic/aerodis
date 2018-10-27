@@ -15,12 +15,14 @@ import (
 	"os"
 	"runtime/pprof"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	as "github.com/aerospike/aerospike-client-go"
+	"github.com/aerospike/aerospike-client-go/logger"
 	"github.com/coocood/freecache"
 )
 
@@ -96,8 +98,15 @@ func getIntFromJson(x interface{}) int {
 			panic(err)
 		}
 		return v
+	case json.Number:
+		v, err := x.(json.Number).Int64()
+		if err != nil {
+			panic(err)
+		}
+		return int(v)
+	default:
+		panic(fmt.Sprint("error int param:", x))
 	}
-	return int(x.(float64))
 }
 
 func displayExpandedMapCacheStat(ctx *context) {
@@ -107,6 +116,20 @@ func displayExpandedMapCacheStat(ctx *context) {
 		log.Printf("%s: cache ratio %d %.2f %%", ctx.set, ctx.expandedMapCache.LookupCount(), ctx.expandedMapCache.HitRate()*100)
 		ctx.expandedMapCache.ResetStatistics()
 	}
+}
+
+func getLogLevel(levelConfig string) logger.LogPriority {
+	level := map[string]logger.LogPriority{
+		"debug":   logger.DEBUG,
+		"info":    logger.INFO,
+		"warning": logger.WARNING,
+		"err":     logger.ERR,
+		"off":     logger.OFF,
+	}
+	if v, ok := level[levelConfig]; ok {
+		return v
+	}
+	return logger.ERR
 }
 
 func main() {
@@ -126,24 +149,29 @@ func main() {
 
 	config := []byte("{\"sets\":[{\"proto\":\"tcp\",\"listen\":\"127.0.0.1:6379\",\"set\":\"redis\"}]}")
 	if *configFile != "" {
-		bytes, err := ioutil.ReadFile(*configFile)
+		configBytes, err := ioutil.ReadFile(*configFile)
 		if err != nil {
 			panic(err)
 		}
-		config = bytes
+		config = configBytes
 	}
 
 	var parsedConfig interface{}
-	e := json.Unmarshal(config, &parsedConfig)
+	configDecoder := json.NewDecoder(bytes.NewReader(config))
+	configDecoder.UseNumber()
+	e := configDecoder.Decode(&parsedConfig)
 	if e != nil {
 		panic(e)
 	}
 
 	m := parsedConfig.(map[string]interface{})
 
+	if m["as_log_level"] != nil {
+		logger.Logger.SetLevel(getLogLevel(m["as_log_level"].(string)))
+	}
+
 	if m["connection_queue_size"] != nil {
-		jsonConnectionQueueSize := getIntFromJson(m["connection_queue_size"])
-		connectionQueueSize = &jsonConnectionQueueSize
+		*connectionQueueSize = getIntFromJson(m["connection_queue_size"])
 	}
 
 	if m["max_fds"] != nil {
@@ -198,7 +226,13 @@ func main() {
 	}
 
 	readPolicy := createReadPolicy()
+	if m["read_socket_time"] != nil {
+		readPolicy.SocketTimeout = time.Duration(getIntFromJson(m["read_socket_time"])) * time.Millisecond
+	}
 	writePolicy := createWritePolicyEx(-1, false)
+	if m["write_socket_time"] != nil {
+		writePolicy.SocketTimeout = time.Duration(getIntFromJson(m["write_socket_time"])) * time.Millisecond
+	}
 
 	var wg sync.WaitGroup
 
@@ -300,7 +334,7 @@ func handleConnection(conn net.Conn, handlers map[string]handler, ctx *context) 
 			return handleError(err, ctx, conn)
 		}
 
-		cmd := string(args[0])
+		cmd := strings.ToUpper(string(args[0]))
 		switch cmd {
 		case "QUIT":
 			return handleError(nil, ctx, conn)
@@ -322,7 +356,7 @@ func handleConnection(conn net.Conn, handlers map[string]handler, ctx *context) 
 			return handleError(err, ctx, conn)
 		}
 
-		execErr := handleCommand(conn, args, handlers, ctx, &multiMode, &multiCounter, multiBuffer)
+		execErr := handleCommand(conn, cmd, args[1:], handlers, ctx, &multiMode, &multiCounter, multiBuffer)
 		if execErr != nil {
 			writeErr(conn, errorPrefix, execErr.Error(), args)
 			atomic.AddUint32(&ctx.counterErr, 1)
@@ -331,8 +365,7 @@ func handleConnection(conn net.Conn, handlers map[string]handler, ctx *context) 
 	}
 }
 
-func handleCommand(wf io.Writer, args [][]byte, handlers map[string]handler, ctx *context, multiMode *bool, multiCounter *int, multiBuffer *bytes.Buffer) error {
-	cmd := string(args[0])
+func handleCommand(wf io.Writer, cmd string, args [][]byte, handlers map[string]handler, ctx *context, multiMode *bool, multiCounter *int, multiBuffer *bytes.Buffer) error {
 	switch cmd {
 	case "MULTI":
 		*multiCounter = 0
@@ -345,7 +378,7 @@ func handleCommand(wf io.Writer, args [][]byte, handlers map[string]handler, ctx
 
 	case "EXEC":
 		if !*multiMode {
-			return errors.New("Exec received, but no MULTI before")
+			return errors.New("exec received, but no MULTI before")
 		}
 
 		*multiMode = false
@@ -361,7 +394,7 @@ func handleCommand(wf io.Writer, args [][]byte, handlers map[string]handler, ctx
 
 	case "DISCARD":
 		if !*multiMode {
-			return errors.New("Exec received, but no MULTI before")
+			return errors.New("discard received, but no MULTI before")
 		}
 
 		*multiMode = false
@@ -371,7 +404,7 @@ func handleCommand(wf io.Writer, args [][]byte, handlers map[string]handler, ctx
 		}
 
 	default:
-		args = args[1:]
+		//args = args[1:]
 		h, ok := handlers[cmd]
 		if ok {
 			if ctx.logCommands {
@@ -382,7 +415,7 @@ func handleCommand(wf io.Writer, args [][]byte, handlers map[string]handler, ctx
 				log.Printf("[ %s ] Command: %s:%s", ctx.set, cmd, end)
 			}
 			if h.argsCount > len(args) {
-				return fmt.Errorf("Wrong number of params for '%s': %d", cmd, len(args))
+				return fmt.Errorf("wrong number of params for '%s': %d", cmd, len(args))
 			}
 			targetWriter := wf
 			if *multiMode {
@@ -396,9 +429,9 @@ func handleCommand(wf io.Writer, args [][]byte, handlers map[string]handler, ctx
 			err := h.f(targetWriter, ctx, args)
 			if err != nil {
 				if !ctx.client.IsConnected() && ctx.exitOnClusterLost {
-					panic(fmt.Errorf("Connection to cluster lost: '%s'", err))
+					panic(fmt.Errorf("connection to cluster lost: '%s'", err))
 				}
-				return fmt.Errorf("Aerospike error: '%s'", err)
+				return fmt.Errorf("aerospike error: '%s'", err)
 			}
 			if h.writeBack {
 				atomic.AddUint32(&ctx.counterWbOk, 1)
@@ -406,7 +439,7 @@ func handleCommand(wf io.Writer, args [][]byte, handlers map[string]handler, ctx
 				atomic.AddUint32(&ctx.counterOk, 1)
 			}
 		} else {
-			return fmt.Errorf("Unknown command '%s'", cmd)
+			return fmt.Errorf("unknown command '%s'", cmd)
 		}
 	}
 
