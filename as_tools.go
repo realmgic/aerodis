@@ -14,6 +14,7 @@ func createReadPolicy() *as.BasePolicy {
 
 func fillWritePolicy(writePolicy *as.WritePolicy) {
 	writePolicy.CommitLevel = as.COMMIT_MASTER
+	writePolicy.SocketTimeout = ProxyConfig.AsWriteSocketTimeout
 }
 
 func createWritePolicyGeneration(generation uint32, ttl int) *as.WritePolicy {

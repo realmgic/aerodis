@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"math/rand"
 	"net"
@@ -138,71 +137,36 @@ func main() {
 
 	rand.Seed(time.Now().UnixNano())
 
-	aeroHost := flag.String("aero_host", "localhost", "Aerospike server host")
-	aeroPort := flag.Int("aero_port", 3000, "Aerospike server port")
 	ns := flag.String("ns", "test", "Aerospike namespace")
 	configFile := flag.String("config_file", "", "Configuration file")
 	exitOnClusterLost := flag.Bool("exit_on_cluster_lost", true, "Exit with an error when the connection to the cluster is lost")
 	generationRetries := flag.Int("generation_retries", 10, "Number of retry when error conflict in HSET / HDEL / LTRIM")
-	connectionQueueSize := flag.Int("connection_queue_size", 256, "Max number of connections to each aerospike node")
 	flag.Parse()
 
-	config := []byte("{\"sets\":[{\"proto\":\"tcp\",\"listen\":\"127.0.0.1:6379\",\"set\":\"redis\"}]}")
-	if *configFile != "" {
-		configBytes, err := ioutil.ReadFile(*configFile)
-		if err != nil {
-			panic(err)
-		}
-		config = configBytes
+	loadProxyConfig(*configFile)
+
+	logger.Logger.SetLevel(getLogLevel(ProxyConfig.AsLogLevel))
+
+	connectionQueueSize := ProxyConfig.AsConnectionQueueSize
+
+	var err error
+
+	maxFds := ProxyConfig.MaxFDs
+	var rLimit syscall.Rlimit
+	rLimit.Max = uint64(maxFds)
+	rLimit.Cur = uint64(maxFds)
+	err = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
+	if err != nil {
+		panic(err)
 	}
+	log.Printf("Set max openfile to %d", maxFds)
 
-	var parsedConfig interface{}
-	configDecoder := json.NewDecoder(bytes.NewReader(config))
-	configDecoder.UseNumber()
-	e := configDecoder.Decode(&parsedConfig)
-	if e != nil {
-		panic(e)
-	}
+	log.Printf("Set connection queue size to %d", connectionQueueSize)
 
-	m := parsedConfig.(map[string]interface{})
-
-	if m["as_log_level"] != nil {
-		logger.Logger.SetLevel(getLogLevel(m["as_log_level"].(string)))
-	}
-
-	if m["connection_queue_size"] != nil {
-		*connectionQueueSize = getIntFromJson(m["connection_queue_size"])
-	}
-
-	if m["max_fds"] != nil {
-		maxFds := getIntFromJson(m["max_fds"])
-		var rLimit syscall.Rlimit
-		rLimit.Max = uint64(maxFds)
-		rLimit.Cur = uint64(maxFds)
-		err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
-		if err != nil {
-			panic(err)
-		}
-		log.Printf("Set max openfile to %d", maxFds)
-	}
-
-	log.Printf("Set connection queue size to %d", *connectionQueueSize)
-
-	jsonAeroHost := m["aerospike_ips"]
-
-	aPort := *aeroPort
-	hosts := make([]string, 0)
-
-	if jsonAeroHost != nil {
-		for _, i := range jsonAeroHost.([]interface{}) {
-			hosts = append(hosts, i.(string))
-		}
-	} else {
-		hosts = append(hosts, *aeroHost)
-	}
+	hosts := ProxyConfig.AsHostList
+	aPort := ProxyConfig.AsPort
 
 	var client *as.Client
-	var err error
 	connected := false
 
 	for !connected {
@@ -210,7 +174,7 @@ func main() {
 			log.Printf("Connecting to aero on %s:%d", i, aPort)
 			policy := as.NewClientPolicy()
 			policy.RequestProleReplicas = true
-			policy.ConnectionQueueSize = *connectionQueueSize
+			policy.ConnectionQueueSize = connectionQueueSize
 			client, err = as.NewClientWithPolicy(policy, i, aPort)
 			if err == nil {
 				log.Printf("Connected to aero on %s:%d, namespace %s", i, aPort, *ns)
@@ -226,27 +190,22 @@ func main() {
 	}
 
 	readPolicy := createReadPolicy()
-	if m["read_socket_time"] != nil {
-		readPolicy.SocketTimeout = time.Duration(getIntFromJson(m["read_socket_time"])) * time.Millisecond
-	}
+	readPolicy.SocketTimeout = ProxyConfig.AsReadSocketTimeout * time.Millisecond
 	writePolicy := createWritePolicyEx(-1, false)
-	if m["write_socket_time"] != nil {
-		writePolicy.SocketTimeout = time.Duration(getIntFromJson(m["write_socket_time"])) * time.Millisecond
-	}
+	writePolicy.SocketTimeout = ProxyConfig.AsWriteSocketTimeout * time.Millisecond
 
 	var wg sync.WaitGroup
 
-	sets := m["sets"]
+	sets := ProxyConfig.AsSetList
 
-	statsdConfig := m["statsd"]
+	statsdConfig := ProxyConfig.Statsd
 
-	for _, c := range sets.([]interface{}) {
+	for _, c := range sets {
 		wg.Add(1)
 
-		m := c.(map[string]interface{})
-		proto := m["proto"].(string)
-		listen := m["listen"].(string)
-		set := m["set"].(string)
+		proto := c.Proto
+		listen := c.Listen
+		set := c.Set
 
 		if proto == "unix" {
 			_, err := os.Stat(listen)
@@ -269,34 +228,32 @@ func main() {
 
 		ctx := context{client, *exitOnClusterLost, *ns, set, readPolicy, writePolicy, 0, 0, 0, 0, 0, nil, 0, false, *generationRetries}
 
-		if statsdConfig != nil {
+		if statsdConfig != "" {
 			log.Printf("%s: Sending stats to statsd %s", set, statsdConfig)
-			go statsd(statsdConfig.(string), &ctx)
+			go statsd(statsdConfig, &ctx)
 		}
 
-		if m["log_commands"] != nil {
-			ctx.logCommands = true
-		}
-		if m["expanded_map"] != nil {
-			if m["default_ttl"] != nil {
-				ctx.expandedMapDefaultTTL = getIntFromJson(m["default_ttl"])
+		ctx.logCommands = c.LogCommands
+		if c.ExpandedMap {
+			if c.ExpandedMapTTL > 0 {
+				ctx.expandedMapDefaultTTL = c.ExpandedMapTTL
 			} else {
 				ctx.expandedMapDefaultTTL = 3600 * 24 * 31
 			}
 			log.Printf("%s: Expanded map mode, ttl %d", set, ctx.expandedMapDefaultTTL)
-			if m["cache_size"] != nil {
-				size := getIntFromJson(m["cache_size"])
+			if c.CacheSize > 0 {
+				size := c.CacheSize
 				ctx.expandedMapCache = freecache.NewCache(size)
 				ctx.expandedMapCacheTTL = 600
-				if m["cache_ttl"] != nil {
-					ctx.expandedMapCacheTTL = getIntFromJson(m["cache_ttl"])
+				if c.CacheTTL > 0 {
+					ctx.expandedMapCacheTTL = c.CacheTTL
 				}
 				log.Printf("%s: Using a cache of %d bytes, ttl %d", set, size, ctx.expandedMapCacheTTL)
 				go displayExpandedMapCacheStat(&ctx)
 			}
-			go handlePort(&ctx, l, writeBack(expandedMapHandlers(), m, &ctx))
+			go handlePort(&ctx, l, writeBack(expandedMapHandlers(), &c, &ctx))
 		} else {
-			go handlePort(&ctx, l, writeBack(standardHandlers(), m, &ctx))
+			go handlePort(&ctx, l, writeBack(standardHandlers(), &c, &ctx))
 		}
 	}
 
