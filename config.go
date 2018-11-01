@@ -24,6 +24,7 @@ type asSetConfig struct {
 }
 
 type proxyConfig struct {
+	AsNamespace           string        `toml:"as_namespace"`
 	AsHostList            []string      `toml:"as_host_list"`
 	AsPort                int           `toml:"as_port"`
 	AsSetList             []asSetConfig `toml:"sets"`

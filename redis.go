@@ -137,7 +137,6 @@ func main() {
 
 	rand.Seed(time.Now().UnixNano())
 
-	ns := flag.String("ns", "test", "Aerospike namespace")
 	configFile := flag.String("config_file", "", "Configuration file")
 	exitOnClusterLost := flag.Bool("exit_on_cluster_lost", true, "Exit with an error when the connection to the cluster is lost")
 	generationRetries := flag.Int("generation_retries", 10, "Number of retry when error conflict in HSET / HDEL / LTRIM")
@@ -147,6 +146,7 @@ func main() {
 
 	logger.Logger.SetLevel(getLogLevel(ProxyConfig.AsLogLevel))
 
+	ns := ProxyConfig.AsNamespace
 	connectionQueueSize := ProxyConfig.AsConnectionQueueSize
 
 	var err error
@@ -177,7 +177,7 @@ func main() {
 			policy.ConnectionQueueSize = connectionQueueSize
 			client, err = as.NewClientWithPolicy(policy, i, aPort)
 			if err == nil {
-				log.Printf("Connected to aero on %s:%d, namespace %s", i, aPort, *ns)
+				log.Printf("Connected to aero on %s:%d, namespace %s", i, aPort, ns)
 				connected = true
 				break
 			} else {
@@ -226,7 +226,7 @@ func main() {
 
 		log.Printf("%s: Listening on %s", set, listen)
 
-		ctx := context{client, *exitOnClusterLost, *ns, set, readPolicy, writePolicy, 0, 0, 0, 0, 0, nil, 0, false, *generationRetries}
+		ctx := context{client, *exitOnClusterLost, ns, set, readPolicy, writePolicy, 0, 0, 0, 0, 0, nil, 0, false, *generationRetries}
 
 		if statsdConfig != "" {
 			log.Printf("%s: Sending stats to statsd %s", set, statsdConfig)
@@ -317,7 +317,7 @@ func handleConnection(conn net.Conn, handlers map[string]handler, ctx *context) 
 		if execErr != nil {
 			writeErr(conn, errorPrefix, execErr.Error(), args)
 			atomic.AddUint32(&ctx.counterErr, 1)
-			return handleError(execErr, ctx, conn)
+			//return handleError(execErr, ctx, conn)
 		}
 	}
 }

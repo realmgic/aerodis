@@ -1,0 +1,14 @@
+as_namespace="test"
+as_host_list=["172.16.185.128"]
+as_port=3000
+as_read_socket_timeout=0
+as_write_socket_timeout=0
+as_connection_queue_size=5
+as_log_level="debug"
+max_fds=10000
+
+[[sets]]
+proto="tcp"
+listen="0.0.0.0:6379"
+set="testset"
+log_commands=true
