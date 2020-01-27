@@ -2,11 +2,12 @@ package main
 
 import (
 	"errors"
-	"io"
-	"strconv"
-
 	as "github.com/aerospike/aerospike-client-go"
 	ase "github.com/aerospike/aerospike-client-go/types"
+	"io"
+	"log"
+	"strconv"
+	"strings"
 )
 
 func cmdDEL(wf io.Writer, ctx *context, args [][]byte) error {
@@ -79,7 +80,30 @@ func setex(wf io.Writer, ctx *context, k []byte, binName string, content []byte,
 }
 
 func cmdSET(wf io.Writer, ctx *context, args [][]byte) error {
-	return setex(wf, ctx, args[0], binName, args[1], -2, false)
+	//The SET command supports a set of options that modify its behavior:
+	//
+	//EX seconds -- Set the specified expire time, in seconds.
+	//	PX milliseconds -- Set the specified expire time, in milliseconds.
+	//	NX -- Only set the key if it does not already exist.
+	//	XX -- Only set the key if it already exist.
+	//	KEEPTTL -- Retain the time to live associated with the key.
+	//
+	// Only PX/NX options are supported now
+
+	var ttl = -2
+
+	if len(args) == 4 {
+		log.Printf("EX/PX option received.")
+		ttlOpt := strings.ToUpper(string(args[2]))
+		if ttlOpt == "EX" {
+			ttl, _ = strconv.Atoi(string(args[3]))
+		} else if ttlOpt == "PX" {
+			ttl, _ = strconv.Atoi(string(args[3]))
+			ttl = int(ttl / 1000)
+		}
+	}
+
+	return setex(wf, ctx, args[0], binName, args[1], ttl, false)
 }
 
 func cmdSETEX(wf io.Writer, ctx *context, args [][]byte) error {
@@ -164,6 +188,7 @@ func hset(wf io.Writer, ctx *context, k []byte, kk []byte, v interface{}, ttl in
 			return err
 		}
 	}
+	//noinspection GoErrorStringFormat
 	return errors.New("Too many retry for hset")
 }
 
