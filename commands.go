@@ -88,11 +88,11 @@ func cmdSET(wf io.Writer, ctx *context, args [][]byte) error {
 	//	XX -- Only set the key if it already exist.
 	//	KEEPTTL -- Retain the time to live associated with the key.
 	//
-	// Only PX/NX options are supported now
+	// Only PX/NX and KEEPTTL options are supported now
 
 	var ttl = -2
 
-	if len(args) == 4 {
+	if len(args) >= 4 {
 		log.Printf("EX/PX option received.")
 		ttlOpt := strings.ToUpper(string(args[2]))
 		if ttlOpt == "EX" {
@@ -101,6 +101,13 @@ func cmdSET(wf io.Writer, ctx *context, args [][]byte) error {
 			ttl, _ = strconv.Atoi(string(args[3]))
 			ttl = int(ttl / 1000)
 		}
+		//TODO: proper handling of SET command
+		if len(args) >= 5 {
+			if strings.ToUpper(string(args[2])) == "KEEPTTL" {
+				ttl = -2
+			}
+		}
+
 	}
 
 	return setex(wf, ctx, args[0], binName, args[1], ttl, false)
