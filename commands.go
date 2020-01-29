@@ -5,7 +5,6 @@ import (
 	as "github.com/aerospike/aerospike-client-go"
 	ase "github.com/aerospike/aerospike-client-go/types"
 	"io"
-	"log"
 	"strconv"
 	"strings"
 )
@@ -93,7 +92,6 @@ func cmdSET(wf io.Writer, ctx *context, args [][]byte) error {
 	var ttl = -2
 
 	if len(args) >= 4 {
-		log.Printf("EX/PX option received.")
 		ttlOpt := strings.ToUpper(string(args[2]))
 		if ttlOpt == "EX" {
 			ttl, _ = strconv.Atoi(string(args[3]))
