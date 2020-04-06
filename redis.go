@@ -8,19 +8,20 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"math/rand"
 	"net"
 	"os"
 	"runtime/pprof"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
 	as "github.com/aerospike/aerospike-client-go"
+	"github.com/aerospike/aerospike-client-go/logger"
 	"github.com/coocood/freecache"
 )
 
@@ -96,8 +97,15 @@ func getIntFromJson(x interface{}) int {
 			panic(err)
 		}
 		return v
+	case json.Number:
+		v, err := x.(json.Number).Int64()
+		if err != nil {
+			panic(err)
+		}
+		return int(v)
+	default:
+		panic(fmt.Sprint("error int param:", x))
 	}
-	return int(x.(float64))
 }
 
 func displayExpandedMapCacheStat(ctx *context) {
@@ -109,72 +117,56 @@ func displayExpandedMapCacheStat(ctx *context) {
 	}
 }
 
+func getLogLevel(levelConfig string) logger.LogPriority {
+	level := map[string]logger.LogPriority{
+		"debug":   logger.DEBUG,
+		"info":    logger.INFO,
+		"warning": logger.WARNING,
+		"err":     logger.ERR,
+		"off":     logger.OFF,
+	}
+	if v, ok := level[levelConfig]; ok {
+		return v
+	}
+	return logger.ERR
+}
+
 func main() {
 	// to change the flags on the default logger
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
 	rand.Seed(time.Now().UnixNano())
 
-	aeroHost := flag.String("aero_host", "localhost", "Aerospike server host")
-	aeroPort := flag.Int("aero_port", 3000, "Aerospike server port")
-	ns := flag.String("ns", "test", "Aerospike namespace")
 	configFile := flag.String("config_file", "", "Configuration file")
 	exitOnClusterLost := flag.Bool("exit_on_cluster_lost", true, "Exit with an error when the connection to the cluster is lost")
 	generationRetries := flag.Int("generation_retries", 10, "Number of retry when error conflict in HSET / HDEL / LTRIM")
-	connectionQueueSize := flag.Int("connection_queue_size", 256, "Max number of connections to each aerospike node")
 	flag.Parse()
 
-	config := []byte("{\"sets\":[{\"proto\":\"tcp\",\"listen\":\"127.0.0.1:6379\",\"set\":\"redis\"}]}")
-	if *configFile != "" {
-		bytes, err := ioutil.ReadFile(*configFile)
-		if err != nil {
-			panic(err)
-		}
-		config = bytes
+	loadProxyConfig(*configFile)
+
+	logger.Logger.SetLevel(getLogLevel(ProxyConfig.AsLogLevel))
+
+	ns := ProxyConfig.AsNamespace
+	connectionQueueSize := ProxyConfig.AsConnectionQueueSize
+
+	var err error
+
+	maxFds := ProxyConfig.MaxFDs
+	var rLimit syscall.Rlimit
+	rLimit.Max = uint64(maxFds)
+	rLimit.Cur = uint64(maxFds)
+	err = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
+	if err != nil {
+		panic(err)
 	}
+	log.Printf("Set max openfile to %d", maxFds)
 
-	var parsedConfig interface{}
-	e := json.Unmarshal(config, &parsedConfig)
-	if e != nil {
-		panic(e)
-	}
+	log.Printf("Set connection queue size to %d", connectionQueueSize)
 
-	m := parsedConfig.(map[string]interface{})
-
-	if m["connection_queue_size"] != nil {
-		jsonConnectionQueueSize := getIntFromJson(m["connection_queue_size"])
-		connectionQueueSize = &jsonConnectionQueueSize
-	}
-
-	if m["max_fds"] != nil {
-		maxFds := getIntFromJson(m["max_fds"])
-		var rLimit syscall.Rlimit
-		rLimit.Max = uint64(maxFds)
-		rLimit.Cur = uint64(maxFds)
-		err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit)
-		if err != nil {
-			panic(err)
-		}
-		log.Printf("Set max openfile to %d", maxFds)
-	}
-
-	log.Printf("Set connection queue size to %d", *connectionQueueSize)
-
-	jsonAeroHost := m["aerospike_ips"]
-
-	aPort := *aeroPort
-	hosts := make([]string, 0)
-
-	if jsonAeroHost != nil {
-		for _, i := range jsonAeroHost.([]interface{}) {
-			hosts = append(hosts, i.(string))
-		}
-	} else {
-		hosts = append(hosts, *aeroHost)
-	}
+	hosts := ProxyConfig.AsHostList
+	aPort := ProxyConfig.AsPort
 
 	var client *as.Client
-	var err error
 	connected := false
 
 	for !connected {
@@ -182,10 +174,10 @@ func main() {
 			log.Printf("Connecting to aero on %s:%d", i, aPort)
 			policy := as.NewClientPolicy()
 			policy.RequestProleReplicas = true
-			policy.ConnectionQueueSize = *connectionQueueSize
+			policy.ConnectionQueueSize = connectionQueueSize
 			client, err = as.NewClientWithPolicy(policy, i, aPort)
 			if err == nil {
-				log.Printf("Connected to aero on %s:%d, namespace %s", i, aPort, *ns)
+				log.Printf("Connected to aero on %s:%d, namespace %s", i, aPort, ns)
 				connected = true
 				break
 			} else {
@@ -198,21 +190,22 @@ func main() {
 	}
 
 	readPolicy := createReadPolicy()
+	readPolicy.SocketTimeout = ProxyConfig.AsReadSocketTimeout * time.Millisecond
 	writePolicy := createWritePolicyEx(-1, false)
+	writePolicy.SocketTimeout = ProxyConfig.AsWriteSocketTimeout * time.Millisecond
 
 	var wg sync.WaitGroup
 
-	sets := m["sets"]
+	sets := ProxyConfig.AsSetList
 
-	statsdConfig := m["statsd"]
+	statsdConfig := ProxyConfig.Statsd
 
-	for _, c := range sets.([]interface{}) {
+	for _, c := range sets {
 		wg.Add(1)
 
-		m := c.(map[string]interface{})
-		proto := m["proto"].(string)
-		listen := m["listen"].(string)
-		set := m["set"].(string)
+		proto := c.Proto
+		listen := c.Listen
+		set := c.Set
 
 		if proto == "unix" {
 			_, err := os.Stat(listen)
@@ -233,36 +226,34 @@ func main() {
 
 		log.Printf("%s: Listening on %s", set, listen)
 
-		ctx := context{client, *exitOnClusterLost, *ns, set, readPolicy, writePolicy, 0, 0, 0, 0, 0, nil, 0, false, *generationRetries}
+		ctx := context{client, *exitOnClusterLost, ns, set, readPolicy, writePolicy, 0, 0, 0, 0, 0, nil, 0, false, *generationRetries}
 
-		if statsdConfig != nil {
+		if statsdConfig != "" {
 			log.Printf("%s: Sending stats to statsd %s", set, statsdConfig)
-			go statsd(statsdConfig.(string), &ctx)
+			go statsd(statsdConfig, &ctx)
 		}
 
-		if m["log_commands"] != nil {
-			ctx.logCommands = true
-		}
-		if m["expanded_map"] != nil {
-			if m["default_ttl"] != nil {
-				ctx.expandedMapDefaultTTL = getIntFromJson(m["default_ttl"])
+		ctx.logCommands = c.LogCommands
+		if c.ExpandedMap {
+			if c.ExpandedMapTTL > 0 {
+				ctx.expandedMapDefaultTTL = c.ExpandedMapTTL
 			} else {
 				ctx.expandedMapDefaultTTL = 3600 * 24 * 31
 			}
 			log.Printf("%s: Expanded map mode, ttl %d", set, ctx.expandedMapDefaultTTL)
-			if m["cache_size"] != nil {
-				size := getIntFromJson(m["cache_size"])
+			if c.CacheSize > 0 {
+				size := c.CacheSize
 				ctx.expandedMapCache = freecache.NewCache(size)
 				ctx.expandedMapCacheTTL = 600
-				if m["cache_ttl"] != nil {
-					ctx.expandedMapCacheTTL = getIntFromJson(m["cache_ttl"])
+				if c.CacheTTL > 0 {
+					ctx.expandedMapCacheTTL = c.CacheTTL
 				}
 				log.Printf("%s: Using a cache of %d bytes, ttl %d", set, size, ctx.expandedMapCacheTTL)
 				go displayExpandedMapCacheStat(&ctx)
 			}
-			go handlePort(&ctx, l, writeBack(expandedMapHandlers(), m, &ctx))
+			go handlePort(&ctx, l, writeBack(expandedMapHandlers(), &c, &ctx))
 		} else {
-			go handlePort(&ctx, l, writeBack(standardHandlers(), m, &ctx))
+			go handlePort(&ctx, l, writeBack(standardHandlers(), &c, &ctx))
 		}
 	}
 
@@ -300,7 +291,7 @@ func handleConnection(conn net.Conn, handlers map[string]handler, ctx *context) 
 			return handleError(err, ctx, conn)
 		}
 
-		cmd := string(args[0])
+		cmd := strings.ToUpper(string(args[0]))
 		switch cmd {
 		case "QUIT":
 			return handleError(nil, ctx, conn)
@@ -322,17 +313,16 @@ func handleConnection(conn net.Conn, handlers map[string]handler, ctx *context) 
 			return handleError(err, ctx, conn)
 		}
 
-		execErr := handleCommand(conn, args, handlers, ctx, &multiMode, &multiCounter, multiBuffer)
+		execErr := handleCommand(conn, cmd, args[1:], handlers, ctx, &multiMode, &multiCounter, multiBuffer)
 		if execErr != nil {
 			writeErr(conn, errorPrefix, execErr.Error(), args)
 			atomic.AddUint32(&ctx.counterErr, 1)
-			return handleError(execErr, ctx, conn)
+			//return handleError(execErr, ctx, conn)
 		}
 	}
 }
 
-func handleCommand(wf io.Writer, args [][]byte, handlers map[string]handler, ctx *context, multiMode *bool, multiCounter *int, multiBuffer *bytes.Buffer) error {
-	cmd := string(args[0])
+func handleCommand(wf io.Writer, cmd string, args [][]byte, handlers map[string]handler, ctx *context, multiMode *bool, multiCounter *int, multiBuffer *bytes.Buffer) error {
 	switch cmd {
 	case "MULTI":
 		*multiCounter = 0
@@ -345,7 +335,7 @@ func handleCommand(wf io.Writer, args [][]byte, handlers map[string]handler, ctx
 
 	case "EXEC":
 		if !*multiMode {
-			return errors.New("Exec received, but no MULTI before")
+			return errors.New("exec received, but no MULTI before")
 		}
 
 		*multiMode = false
@@ -361,7 +351,7 @@ func handleCommand(wf io.Writer, args [][]byte, handlers map[string]handler, ctx
 
 	case "DISCARD":
 		if !*multiMode {
-			return errors.New("Exec received, but no MULTI before")
+			return errors.New("discard received, but no MULTI before")
 		}
 
 		*multiMode = false
@@ -371,7 +361,7 @@ func handleCommand(wf io.Writer, args [][]byte, handlers map[string]handler, ctx
 		}
 
 	default:
-		args = args[1:]
+		//args = args[1:]
 		h, ok := handlers[cmd]
 		if ok {
 			if ctx.logCommands {
@@ -382,7 +372,7 @@ func handleCommand(wf io.Writer, args [][]byte, handlers map[string]handler, ctx
 				log.Printf("[ %s ] Command: %s:%s", ctx.set, cmd, end)
 			}
 			if h.argsCount > len(args) {
-				return fmt.Errorf("Wrong number of params for '%s': %d", cmd, len(args))
+				return fmt.Errorf("wrong number of params for '%s': %d", cmd, len(args))
 			}
 			targetWriter := wf
 			if *multiMode {
@@ -396,9 +386,9 @@ func handleCommand(wf io.Writer, args [][]byte, handlers map[string]handler, ctx
 			err := h.f(targetWriter, ctx, args)
 			if err != nil {
 				if !ctx.client.IsConnected() && ctx.exitOnClusterLost {
-					panic(fmt.Errorf("Connection to cluster lost: '%s'", err))
+					panic(fmt.Errorf("connection to cluster lost: '%s'", err))
 				}
-				return fmt.Errorf("Aerospike error: '%s'", err)
+				return fmt.Errorf("aerospike error: '%s'", err)
 			}
 			if h.writeBack {
 				atomic.AddUint32(&ctx.counterWbOk, 1)
@@ -406,7 +396,7 @@ func handleCommand(wf io.Writer, args [][]byte, handlers map[string]handler, ctx
 				atomic.AddUint32(&ctx.counterOk, 1)
 			}
 		} else {
-			return fmt.Errorf("Unknown command '%s'", cmd)
+			return fmt.Errorf("unknown command '%s'", cmd)
 		}
 	}
 

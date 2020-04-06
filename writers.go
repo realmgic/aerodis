@@ -18,7 +18,7 @@ func writeErr(wf io.Writer, errorPrefix string, s string, args [][]byte) error {
 		two = string(args[1])
 	}
 	log.Printf("%s Client error : %s {%s, %s}\n", errorPrefix, s, one, two)
-	return write(wf, []byte("-ERR "+s+"\n"))
+	return write(wf, []byte("-ERR "+s+"\r\n"))
 }
 
 func writeByteArray(wf io.Writer, buf []byte) error {
@@ -137,8 +137,8 @@ func writeArrayBin(wf io.Writer, res []*as.Record, binName string, keyBinName st
 }
 
 func encode(ctx *context, buf []byte) interface{} {
-	if len(buf) < 10 {
-		x, err := strconv.Atoi(string(buf))
+	if len(buf) <= 20 {
+		x, err := strconv.ParseInt(String(buf), 10, 64)
 		if err == nil {
 			return x
 		}
