@@ -19,11 +19,11 @@ func sendMessage(wf io.Writer, conn *net.UDPConn, cacheName string, key string, 
 	return writeLine(wf, "+OK")
 }
 
-func writeBack(handlers map[string]handler, config map[string]interface{}, ctx *context) map[string]handler {
-	if config["write_back_target"] == nil {
+func writeBack(handlers map[string]handler, config *asSetConfig, ctx *context) map[string]handler {
+	if config.WriteBackTarget == "" {
 		return handlers
 	}
-	ra, err := net.ResolveUDPAddr("udp", config["write_back_target"].(string))
+	ra, err := net.ResolveUDPAddr("udp", config.WriteBackTarget)
 	if err != nil {
 		panic(err)
 	}
@@ -31,14 +31,14 @@ func writeBack(handlers map[string]handler, config map[string]interface{}, ctx *
 	if err != nil {
 		panic(err)
 	}
-	if config["write_back_setTimeout"] != nil {
+	if config.WriteBackSetTimeout {
 		cacheName := "CACHE_" + strings.ToUpper(ctx.set)
 		m := make(map[string]interface{})
 		m["cache_name"] = cacheName
 		m["method"] = "setTimeout"
 		a := make([]interface{}, 2)
 		m["args"] = a
-		log.Printf("%s: Using write back for setTimeout to %s", ctx.set, config["write_back_target"])
+		log.Printf("%s: Using write back for setTimeout to %s", ctx.set, config.WriteBackTarget)
 		f := func(wf io.Writer, ctx *context, args [][]byte) error {
 			key := string(args[0])
 			ttl, err := strconv.Atoi(string(args[1]))
@@ -51,14 +51,14 @@ func writeBack(handlers map[string]handler, config map[string]interface{}, ctx *
 		}
 		handlers["EXPIRE"] = handler{handlers["EXPIRE"].argsCount, handlers["EXPIRE"].argsLogCount, f, true}
 	}
-	if config["write_back_hIncrBy"] != nil {
+	if config.WriteBackHincrBy {
 		cacheName := "CACHE_" + strings.ToUpper(ctx.set)
 		m := make(map[string]interface{})
 		m["cache_name"] = cacheName
 		m["method"] = "hIncrBy"
 		a := make([]interface{}, 3)
 		m["args"] = a
-		log.Printf("%s: Using write back for hIncrBy to %s", ctx.set, config["write_back_target"])
+		log.Printf("%s: Using write back for hIncrBy to %s", ctx.set, config.WriteBackTarget)
 		f := func(wf io.Writer, ctx *context, args [][]byte) error {
 			key := string(args[0])
 			field := string(args[1])
