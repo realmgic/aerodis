@@ -102,6 +102,7 @@ Example of config file:
   "aerospike_ips": [
     "192.168.56.80"
   ],
+  "max_fds": 2048,
   "sets": [{
     "proto": "tcp",
     "listen": "0.0.0.0:6379",
@@ -118,11 +119,17 @@ Example of config file:
 
 * ``aerospike_ips``: Add some Aerospike ips to start the Aerospike connection. Usually two ips are enough.
 * This config file will
+** set open file limit to 2048
 ** open a Redis interface on the TCP port ``6379``, using standard map implementation,
 which will be backed on ``redis.set1`` in Aerospike.
 You can specify the namespace to use in the command line.
 ** open a Redis interface in the unix socket ``/tmp/my_socket``, using expanded_map map implementation, with a 2M cache.
 Do not forget to create the secondary index on the set ``redis.expanded_map``in Aerospike.
+
+### Example
+```bash
+aerodis -config_file /etc/aerodis-counter.json -ns counter -exit_on_cluster_lost false -connection_queue_size 2048
+```
 
 ## Tests
 
